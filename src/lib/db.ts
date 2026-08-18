@@ -11,7 +11,6 @@ const DB_PATH = process.env.DB_PATH ?? path.join(DATA_DIR, "voicenotes.db");
 
 // Singleton: reuse the same connection across hot-reloads in dev
 declare global {
-  // eslint-disable-next-line no-var
   var __db: Database.Database | undefined;
 }
 

@@ -23,6 +23,15 @@ function formatTotalDuration(ms: number): string {
   return `${s}s`;
 }
 
+function extensionForMime(mime: string): string {
+  const base = mime.split(";")[0].trim().toLowerCase();
+  if (base === "audio/ogg") return "ogg";
+  if (base === "audio/mp4") return "m4a";
+  if (base === "audio/mpeg" || base === "audio/mp3") return "mp3";
+  if (base === "audio/wav" || base === "audio/x-wav") return "wav";
+  return "webm";
+}
+
 export default function HomePage() {
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
@@ -45,8 +54,11 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
-    fetchNotes();
-    fetchStats();
+    const timer = window.setTimeout(() => {
+      void fetchNotes();
+      void fetchStats();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [fetchNotes, fetchStats]);
 
   // Enumerate microphones (need permission first)
@@ -94,11 +106,25 @@ export default function HomePage() {
     blob: Blob,
     durationMs: number,
     micLabel: string,
+    liveTranscript?: string,
   ) => {
+    if (blob.size < 1000) {
+      console.error("Upload failed", {
+        error: "Recording was too short or empty",
+        size: blob.size,
+        type: blob.type,
+        durationMs,
+      });
+      return;
+    }
+
     const form = new FormData();
-    form.append("audio", blob, "recording");
+    form.append("audio", blob, `recording.${extensionForMime(blob.type)}`);
     form.append("mic_label", micLabel);
     form.append("duration_ms", String(durationMs));
+    if (liveTranscript?.trim()) {
+      form.append("live_transcript", liveTranscript.trim());
+    }
 
     // Show a placeholder until the server assigns a real ID
     const uploadId = `uploading-${Date.now()}`;
@@ -107,8 +133,21 @@ export default function HomePage() {
     try {
       const res = await fetch("/api/notes", { method: "POST", body: form });
       if (!res.ok || !res.body) {
-        const err = await res.json().catch(() => ({ error: "Upload failed" }));
-        console.error("Upload failed", err);
+        const body = await res.text().catch(() => "");
+        let details: unknown = body;
+        try {
+          details = body ? JSON.parse(body) : null;
+        } catch {
+          // Keep raw response text.
+        }
+        console.error("Upload failed", {
+          status: res.status,
+          statusText: res.statusText,
+          size: blob.size,
+          type: blob.type,
+          durationMs,
+          details,
+        });
         return;
       }
 
@@ -148,7 +187,9 @@ export default function HomePage() {
     // Mark the note as reprocessing in-place
     setNotes((prev) =>
       prev.map((n) =>
-        n.id === id ? { ...n, status: "transcribing" as const, error: null } : n,
+        n.id === id
+          ? { ...n, status: "transcribing" as const, error: null }
+          : n,
       ),
     );
     const res = await fetch(`/api/notes/${id}/reprocess`, { method: "POST" });

@@ -1,5 +1,6 @@
 import { db } from "./db";
 import { transcribeAudio, cleanAndSummarize } from "./transcribe";
+import type { UsageInfo } from "./openrouter";
 
 export type ProcessEvent =
   | { type: "status"; status: "transcribing" | "cleaning" | "done" }
@@ -26,15 +27,29 @@ export async function runProcessing(
   buffer: Buffer,
   mime: string,
   send: (e: ProcessEvent) => void,
-  options: { logToLedger: boolean },
+  options: { fallbackTranscript?: string | null; logToLedger: boolean },
 ): Promise<void> {
   send({ type: "status", status: "transcribing" });
 
   try {
-    const { text: verbatim, usage: transcribeUsage } = await transcribeAudio(
-      buffer,
-      mime,
-    );
+    let verbatim: string;
+    let transcribeUsage: UsageInfo;
+    const browserTranscript = options.fallbackTranscript?.trim();
+
+    if (browserTranscript) {
+      verbatim = browserTranscript;
+      transcribeUsage = {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        cost: 0,
+      };
+    } else {
+      const result = await transcribeAudio(buffer, mime);
+      verbatim = result.text;
+      transcribeUsage = result.usage;
+    }
+
     db.prepare(
       `UPDATE notes SET verbatim = ?, error = NULL, status = 'cleaning' WHERE id = ?`,
     ).run(verbatim, noteId);

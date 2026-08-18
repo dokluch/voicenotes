@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
     "@tailwindcss/typography": "^0.5.19",
     "better-sqlite3": "^12.9.0",
     "nanoid": "^5.1.9",

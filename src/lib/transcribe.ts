@@ -54,15 +54,75 @@ const CleanupSchema = z.object({
   summary: z.string(),
 });
 
+const ChunkCleanupSchema = z.object({
+  cleaned: z.string(),
+  summary: z.string(),
+});
+
 export type CleanupResult = z.infer<typeof CleanupSchema>;
 
 export interface CleanupWithUsage extends CleanupResult {
   usage: UsageInfo;
 }
 
+function emptyUsage(): UsageInfo {
+  return {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    cost: 0,
+  };
+}
+
+function addUsage(total: UsageInfo, next: UsageInfo): UsageInfo {
+  return {
+    prompt_tokens: total.prompt_tokens + next.prompt_tokens,
+    completion_tokens: total.completion_tokens + next.completion_tokens,
+    total_tokens: total.total_tokens + next.total_tokens,
+    cost: total.cost + next.cost,
+  };
+}
+
+function splitTranscript(text: string, maxChars = 7000): string[] {
+  const paragraphs = text
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const paragraph of paragraphs) {
+    if (!current) {
+      current = paragraph;
+      continue;
+    }
+    if (current.length + paragraph.length + 2 <= maxChars) {
+      current = `${current}\n\n${paragraph}`;
+      continue;
+    }
+    chunks.push(current);
+    current = paragraph;
+  }
+  if (current) chunks.push(current);
+
+  return chunks.flatMap((chunk) => {
+    if (chunk.length <= maxChars) return [chunk];
+    const slices: string[] = [];
+    for (let offset = 0; offset < chunk.length; offset += maxChars) {
+      slices.push(chunk.slice(offset, offset + maxChars));
+    }
+    return slices;
+  });
+}
+
 export async function cleanAndSummarize(
   verbatim: string,
 ): Promise<CleanupWithUsage> {
+  const transcriptChunks = splitTranscript(verbatim);
+  if (transcriptChunks.length > 1) {
+    return cleanAndSummarizeChunked(transcriptChunks);
+  }
+
   const { text: raw, usage } = await chatCompletion(
     [
       {
@@ -98,4 +158,116 @@ ${verbatim}`,
 
   // Graceful fallback: treat raw text as cleaned, leave title/summary empty
   return { title: "", cleaned: raw, summary: "", usage };
+}
+
+async function cleanTranscriptChunk(
+  chunk: string,
+  chunkNumber: number,
+  totalChunks: number,
+): Promise<{ cleaned: string; summary: string; usage: UsageInfo }> {
+  const { text: raw, usage } = await chatCompletion(
+    [
+      {
+        role: "user",
+        content: `You are editing chunk ${chunkNumber} of ${totalChunks} from one long verbatim voice transcript.
+
+Return ONLY valid JSON matching this shape:
+{"cleaned":"...","summary":"..."}
+
+Rules:
+- Preserve the speaker's original language. Do not translate.
+- Preserve meaning exactly. Do not add or remove ideas.
+- Remove filler words, repair punctuation, and format the cleaned text as Markdown.
+- Use paragraph breaks where natural. Use lists only when the speaker is enumerating.
+- The summary should be 1-2 plain-text sentences for this chunk only.
+
+Transcript chunk:
+${chunk}`,
+      },
+    ],
+    0.2,
+  );
+
+  const jsonStr = raw
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+
+  try {
+    const parsed = ChunkCleanupSchema.safeParse(JSON.parse(jsonStr));
+    if (parsed.success) return { ...parsed.data, usage };
+  } catch {
+    // fall through to graceful degradation
+  }
+
+  return { cleaned: raw, summary: "", usage };
+}
+
+async function cleanAndSummarizeChunked(
+  transcriptChunks: string[],
+): Promise<CleanupWithUsage> {
+  let usage = emptyUsage();
+  const cleanedChunks: string[] = [];
+  const summaries: string[] = [];
+
+  for (
+    let chunkIndex = 0;
+    chunkIndex < transcriptChunks.length;
+    chunkIndex += 1
+  ) {
+    const result = await cleanTranscriptChunk(
+      transcriptChunks[chunkIndex],
+      chunkIndex + 1,
+      transcriptChunks.length,
+    );
+    cleanedChunks.push(result.cleaned);
+    if (result.summary) summaries.push(`${chunkIndex + 1}. ${result.summary}`);
+    usage = addUsage(usage, result.usage);
+  }
+
+  const cleaned = cleanedChunks.join("\n\n").trim();
+  const excerpt = cleaned.slice(0, 5000);
+  const { text: rawFinal, usage: finalUsage } = await chatCompletion(
+    [
+      {
+        role: "user",
+        content: `You are finalizing one long edited voice note from chunk summaries.
+
+Return ONLY valid JSON matching this shape:
+{"title":"...","summary":"..."}
+
+Rules:
+- Preserve the speaker's original language. Do not translate.
+- title: 3-7 words, no punctuation at the end.
+- summary: 1-3 plain-text sentences covering the whole recording.
+
+Chunk summaries:
+${summaries.join("\n")}
+
+Opening excerpt for style/context:
+${excerpt}`,
+      },
+    ],
+    0.2,
+  );
+
+  usage = addUsage(usage, finalUsage);
+
+  const jsonStr = rawFinal
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+
+  try {
+    const parsed = z
+      .object({ title: z.string(), summary: z.string() })
+      .safeParse(JSON.parse(jsonStr));
+    if (parsed.success) {
+      return { ...parsed.data, cleaned, usage };
+    }
+  } catch {
+    // fall through to graceful degradation
+  }
+
+  return { title: "", cleaned, summary: summaries.join(" "), usage };
 }

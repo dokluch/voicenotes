@@ -53,6 +53,10 @@ export async function POST(req: NextRequest) {
   const durationMs = formData.get("duration_ms")
     ? Number(formData.get("duration_ms"))
     : null;
+  const liveTranscript =
+    typeof formData.get("live_transcript") === "string"
+      ? (formData.get("live_transcript") as string).trim() || null
+      : null;
   const mime = audioFile.type || "audio/webm";
 
   const id = nanoid();
@@ -84,7 +88,10 @@ export async function POST(req: NextRequest) {
       send({ type: "id", id });
 
       try {
-        await runProcessing(id, buffer, mime, send, { logToLedger: true });
+        await runProcessing(id, buffer, mime, send, {
+          fallbackTranscript: liveTranscript,
+          logToLedger: true,
+        });
       } finally {
         controller.close();
       }
@@ -95,7 +102,7 @@ export async function POST(req: NextRequest) {
     headers: {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
+      Connection: "keep-alive",
       "X-Accel-Buffering": "no",
     },
   });
